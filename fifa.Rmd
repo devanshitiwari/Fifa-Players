@@ -1,0 +1,206 @@
+---
+title: "HW3"
+author: "Zhenghao Zhou"
+date: "1/27/2021"
+output: pdf_document
+---
+
+```{r}
+# Library Inputs
+library(tidyverse)
+library(dplyr)
+library(dslabs)
+library(ggplot2)
+library(ggcorrplot)
+library(funModeling)
+library(fastDummies)
+library(MASS)
+library(data.table)
+library(glmnet)
+library(caret)
+library(olsrr)
+library(Metrics)
+
+Player <- read_csv('FIFA_Player_List.csv')
+summary(Player)
+Player <- subset(Player, select = -Player )
+```
+```{r}
+# Dealing with missing data
+# what is the proportion of missing data for each variable?
+pctmiss <- colSums(is.na(Player))/nrow(Player)
+round(pctmiss, 2)
+# No imputation needed
+```
+
+```{r}
+Player$`Preferred Foot` <- ifelse(Player$`Preferred Foot` == 'Left', 1, 0)
+par(mfrow=c(2,2))
+plot(Player$`Preferred Foot`, Player$`Market Value`, xlab = "Preferred Foot", ylab = "Market Value")
+plot(Player$Goalkeeping, Player$`Market Value`, xlab = "Goalkeeping", ylab = "Market Value")
+plot(Player$Age, Player$`Market Value`, xlab = "Age", ylab = "Market Value")
+plot(Player$`Weekly Salary`, Player$`Market Value`, xlab = "Weekly Salary", ylab = "Market Value")
+```
+```{r}
+par(mfrow=c(2,2))
+plot(Player$`Ball Skills`, Player$Mental, xlab = "Ball Skills", ylab = "Mental")
+plot(Player$Shooting, Player$Mental, xlab = "Shooting", ylab = "Mental")
+plot(Player$`Potential Score`, Player$`Overall Score`, xlab = "Potential Score", ylab = "Overall Score")
+plot(Player$`Ball Skills`, Player$Shooting, xlab = "Ball Skills", ylab = "Shooting")
+```
+
+```{r}
+# Check Skeweness using histogram
+plot_num(Player, bins = 20)
+# We can do log transformation for Market Value and Weekly Summary
+```
+
+```{r}
+# Correlation Matrix
+# Select numeric variables
+num <- dplyr::select_if(Player, is.numeric)
+
+# Calculate the correlations and filter
+corr <- cor(num)
+ggcorrplot(corr, hc.order = TRUE, lab = TRUE)
+corr[corr == 1] <- NA 
+corr[abs(corr) < 0.8] <- NA 
+corr <- na.omit(melt(corr))
+corr[order(-abs(corr$value)),]
+```
+
+```{r}
+# Variable transformation
+Player$`Market Value` <- log(Player$`Market Value`)
+Player$`Weekly Salary` <- log(Player$`Weekly Salary`)
+Player$Age_2 <- (Player$Age)^2
+
+# Make Categorical data
+Player$Goalkeeping <- cut(Player$Goalkeeping,
+                                 breaks=c(0, 40, Inf),
+                                 include.lowest=TRUE,
+                                 labels=c("Others", "GoalKeeper"))
+```
+
+```{r}
+# Creating multiple regression
+Player <- Player[-c(2, 8, 9, 11)]
+
+# Train Test data split
+set.seed(3456)
+trainIndex <- createDataPartition(Player$`Market Value`, p = .75,
+                                  list = FALSE,
+                                  times = 1)
+Train <- Player[ trainIndex,]
+Test <- Player[-trainIndex,]
+
+x_train <- model.matrix(Train$`Market Value` ~ . , Train)[,-1]
+y_train <- Train$`Market Value`
+x_test <- model.matrix(Test$`Market Value` ~ . , Test)[,-1]
+y_test <- Test$`Market Value`
+
+selected_model <- lm(`Market Value` ~ ., data = Train)
+summary(selected_model)
+Pred_test <- predict(selected_model, Test)
+rmse(y_test, Pred_test)
+mape(y_test, Pred_test)
+eval_results <- function(true, predicted, df) {
+  SSE <- sum((predicted - true)^2)
+  SST <- sum((true - mean(true))^2)
+  R_square <- 1 - SSE / SST
+  print(R_square)
+}
+eval_results(y_test, Pred_test, Test)
+
+# Final Model Evaluation
+layout(matrix(c(1,1,2,3), 2, 2, byrow = TRUE))
+plot(selected_model, which= 1)
+plot(exp(y_test), exp(Pred_test), xlab = "Actual Values", ylab = "Predicted Values")
+mse <- (y_test- Pred_test)^2
+plot(exp(y_test), mse, xlab='Actual Values', ylab='MSE')
+```
+
+```{r}
+# Lasso Regression
+x <- model.matrix(Player$`Market Value` ~ . , Player)[,-1]
+y <- Player$`Market Value`
+lambda_seq <- 10^seq(2, -2, by = -.1)
+
+# AIC Selection
+model_1 <- glmnet(x, y, alpha = 1, lambda = lambda_seq)
+AIC_out <- deviance(model_1) + 2*model_1$df
+a <- data.frame(lambda_seq, AIC_out)
+aic_lambda <- a$lambda_seq[a$AIC_out==min(a$AIC_out)]
+aic_lambda
+
+# CV Selection
+cv_out <- cv.glmnet(x, y, alpha = 1, lambda = lambda_seq, nfolds = 10)
+
+par(mfrow=c(2,1))
+plot(log(lambda_seq), AIC_out, type = "l")
+plot(cv_out)
+
+# Identifying best lambda
+best_lam <- cv_out$lambda.min
+best_lam
+
+# Rebuilding the model with best lambda value identified
+lasso_best <- glmnet(x_train, y_train, alpha = 1, lambda = best_lam, standardize = FALSE)
+Pred_train <- predict(lasso_best, s = best_lam, newx = x_train)
+Pred_test <- predict(lasso_best, s = best_lam, newx = x_test)
+
+# Checking the best coefficients
+coef(lasso_best)
+
+# Compute R^2 from true and predicted values
+eval_results <- function(true, predicted, df) {
+  SSE <- sum((predicted - true)^2)
+  SST <- sum((true - mean(true))^2)
+  R_square <- 1 - SSE / SST
+  RMSE = sqrt(SSE/nrow(df))
+  data.frame(RMSE = RMSE, Rsquare = R_square)
+  }
+# Prediction and evaluation on train data
+eval_results(y_train, Pred_train, Train)
+
+# Prediction and evaluation on test data
+eval_results(y_test, Pred_test, Test)
+mape(y_test, Pred_test)
+```
+
+```{r}
+# Ridge Regression
+# AIC Selection
+model_2 <- glmnet(x, y, alpha = 0, lambda = lambda_seq)
+AIC_out <- deviance(model_2) + 2*model_2$df
+a <- data.frame(lambda_seq, AIC_out)
+aic_lambda <- a$lambda_seq[a$AIC_out==min(a$AIC_out)]
+aic_lambda
+
+# CV Selection
+cv_out <- cv.glmnet(x, y, alpha = 0, lambda = lambda_seq, nfolds = 10)
+
+par(mfrow=c(2,1))
+plot(log(lambda_seq), AIC_out, type = "l")
+plot(cv_out)
+
+# Identifying best lambda
+best_lam <- cv_out$lambda.min
+best_lam
+
+# Rebuilding the model with best lambda value identified
+ridge_best <- glmnet(x_train, y_train, alpha = 0, lambda = best_lam)
+Pred_train <- predict(ridge_best, s = best_lam1, newx = x_train)
+Pred_test <- predict(ridge_best, s = best_lam1, newx = x_test)
+
+# Checking the best coefficients
+coef(ridge_best)
+
+# Prediction and evaluation on train data
+eval_results(y_train, Pred_train, Train)
+
+# Prediction and evaluation on test data
+eval_results(y_test, Pred_test, Test)
+mape(y_test, Pred_test)
+```
+
